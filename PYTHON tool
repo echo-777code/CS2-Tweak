@@ -1,0 +1,565 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+ECHO AI - CMD-Toolbox
+
+Reine Konsolen-Version mit Zahlen-Menue:
+  1 = Namens-Check (Plattformen + Domains)
+  2 = IP-Scanner (Geraete im lokalen Netzwerk)
+  3 = Port-Scanner (offene Ports eines Hosts)
+  4 = IP-Info (Standort/Anbieter einer IP oder Domain)
+  5 = DNS-Lookup (Domain -> IP)
+  0 = Beenden
+
+Start:   python echo_ai_cmd.py      (oder Doppelklick auf die Datei)
+Braucht: Python 3.8+ - keine zusaetzlichen Pakete.
+Neue Menuepunkte: Funktion schreiben und unten in ACTIONS eintragen.
+"""
+
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import quote
+
+# ----------------------------------------------------------------------------
+# Farben (schwarz / orange) - ANSI, funktioniert in Windows 10/11 und Linux/macOS
+# ----------------------------------------------------------------------------
+ORANGE = "\033[38;5;208m"
+GREEN = "\033[92m"
+RED = "\033[91m"
+YELLOW = "\033[93m"
+GRAY = "\033[90m"
+WHITE = "\033[97m"
+BOLD = "\033[1m"
+RESET = "\033[0m"
+
+UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
+
+# ----------------------------------------------------------------------------
+# Plattformen: (Name, URL-Vorlage, Text bei "nicht gefunden", unsicher?)
+# unsicher=True -> Seite antwortet oft "200" auch wenn es den Namen nicht gibt;
+# ein Treffer wird dann nur als "UNKLAR" gemeldet, ein 404 bleibt "FREI".
+# ----------------------------------------------------------------------------
+PLATFORMS = [
+    ("GitHub", "https://github.com/{}", None, False),
+    ("GitLab", "https://gitlab.com/{}", None, False),
+    ("Codeberg", "https://codeberg.org/{}", None, False),
+    ("Bitbucket", "https://bitbucket.org/{}/", None, False),
+    ("Hugging Face", "https://huggingface.co/{}", None, False),
+    ("PyPI", "https://pypi.org/user/{}/", None, False),
+    ("npm", "https://www.npmjs.com/~{}", None, True),
+    ("Docker Hub", "https://hub.docker.com/v2/users/{}/", None, False),
+    ("Kaggle", "https://www.kaggle.com/{}", None, True),
+    ("Replit", "https://replit.com/@{}", None, True),
+    ("Dev.to", "https://dev.to/{}", None, False),
+    ("Medium", "https://medium.com/@{}", None, False),
+    ("YouTube", "https://www.youtube.com/@{}", None, False),
+    ("TikTok", "https://www.tiktok.com/@{}", None, True),
+    ("Instagram", "https://www.instagram.com/{}/", None, True),
+    ("X / Twitter", "https://x.com/{}", None, True),
+    ("Reddit", "https://www.reddit.com/user/{}/about.json", None, False),
+    ("Pinterest", "https://www.pinterest.com/{}/", None, True),
+    ("Twitch", "https://www.twitch.tv/{}", None, True),
+    ("LinkedIn (Firma)", "https://www.linkedin.com/company/{}", None, True),
+    ("Steam", "https://steamcommunity.com/id/{}",
+     "The specified profile could not be found", False),
+    ("SoundCloud", "https://soundcloud.com/{}", None, False),
+    ("Vimeo", "https://vimeo.com/{}", None, False),
+    ("Behance", "https://www.behance.net/{}", None, False),
+    ("Dribbble", "https://dribbble.com/{}", None, False),
+    ("Patreon", "https://www.patreon.com/{}", None, False),
+    ("Ko-fi", "https://ko-fi.com/{}", None, False),
+    ("Linktree", "https://linktr.ee/{}", None, False),
+    ("Keybase", "https://keybase.io/{}", None, False),
+    ("Gravatar", "https://gravatar.com/{}", None, False),
+    ("About.me", "https://about.me/{}", None, False),
+    ("Mastodon (social)", "https://mastodon.social/@{}", None, False),
+    ("Product Hunt", "https://www.producthunt.com/@{}", None, True),
+    ("Etsy (Shop)", "https://www.etsy.com/shop/{}", None, True),
+]
+
+DOMAINS = [".com", ".de", ".ai", ".io", ".net", ".org", ".dev", ".app"]
+
+COMMON_PORTS = {
+    21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP", 53: "DNS", 80: "HTTP",
+    110: "POP3", 135: "RPC", 139: "NetBIOS", 143: "IMAP", 443: "HTTPS",
+    445: "SMB", 993: "IMAPS", 995: "POP3S", 1433: "MSSQL", 3306: "MySQL",
+    3389: "RDP", 5432: "PostgreSQL", 5900: "VNC", 8080: "HTTP-Alt",
+    8443: "HTTPS-Alt",
+}
+
+
+# ----------------------------------------------------------------------------
+# Hilfsfunktionen fuer die Konsole
+# ----------------------------------------------------------------------------
+def init_console():
+    if os.name == "nt":
+        os.system("")  # schaltet ANSI-Farben in cmd ein
+        os.system("title Echo AI")
+        os.system("mode con: cols=100 lines=40 >nul 2>&1")
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+
+def clear():
+    os.system("cls" if os.name == "nt" else "clear")
+
+
+def _big_text(text):
+    font = {
+        "E": [" ___ ", "| __|", "| _| ", "|___|"],
+        "C": ["  ___ ", " / __|", "| (__ ", " \\___|"],
+        "H": [" _  _ ", "| || |", "| __ |", "|_||_|"],
+        "O": ["  ___  ", " / _ \\ ", "| (_) |", " \\___/ "],
+        "A": ["   _   ", "  /_\\  ", " / _ \\ ", "/_/ \\_\\"],
+        "I": [" ___ ", "|_ _|", " | | ", "|___|"],
+        " ": ["    ", "    ", "    ", "    "],
+    }
+    rows = ["", "", "", ""]
+    for ch in text:
+        for i in range(4):
+            rows[i] += font[ch][i]
+    return rows
+
+
+def banner():
+    print()
+    for row in _big_text("ECHO AI"):
+        print(f"  {ORANGE}{BOLD}{row}{RESET}")
+    print(f"  {GRAY}{'-' * 44}{RESET}")
+    print(f"  {GRAY}Toolbox  |  Namen, Netzwerk, DNS{RESET}\n")
+
+
+def progress(done, total, label=""):
+    width = 30
+    filled = int(width * done / total) if total else width
+    bar = "#" * filled + "-" * (width - filled)
+    sys.stdout.write(f"\r  {ORANGE}[{bar}]{RESET} {done}/{total}  {label[:26]:<26}")
+    sys.stdout.flush()
+
+
+def ask(prompt):
+    return input(f"  {ORANGE}>{RESET} {prompt}").strip()
+
+
+def pause():
+    try:
+        input(f"\n  {GRAY}Enter druecken, um zum Menue zurueckzukehren ...{RESET}")
+    except EOFError:
+        pass
+
+
+def splash():
+    clear()
+    banner()
+    print(f"  {WHITE}Lade Echo AI ...{RESET}\n")
+    for i in range(41):
+        progress(i, 40, "starte")
+        time.sleep(0.05)
+    print()
+    time.sleep(0.3)
+
+
+def has_internet():
+    try:
+        socket.gethostbyname("example.com")
+        return True
+    except Exception:
+        return False
+
+
+def need_internet():
+    if has_internet():
+        return True
+    print(f"  {RED}Keine Internetverbindung - bitte pruefen und erneut versuchen.{RESET}")
+    return False
+
+
+# ----------------------------------------------------------------------------
+# 1) Namens-Check: Plattformen + Domains
+# ----------------------------------------------------------------------------
+def check_url(url, marker=None, weak=False):
+    req = urllib.request.Request(
+        url, headers={"User-Agent": UA, "Accept-Language": "en-US,en;q=0.8"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            if marker:
+                body = resp.read(300_000).decode("utf-8", "ignore").lower()
+                return "free" if marker.lower() in body else "taken"
+            return "unclear" if weak else "taken"
+    except urllib.error.HTTPError as e:
+        if e.code in (404, 410):
+            return "free"
+        return "unclear"  # 403 / 429 / 999 ... = Seite blockt Bots
+    except Exception:
+        return "unclear"
+
+
+def check_domain(domain):
+    try:
+        socket.gethostbyname(domain)
+        return "taken"
+    except socket.gaierror:
+        return "free"  # keine DNS-Antwort = sehr wahrscheinlich nicht registriert
+    except Exception:
+        return "unclear"
+
+
+def name_check():
+    if not need_internet():
+        return
+    name = ask("Name eingeben: ").replace(" ", "")
+    if not name:
+        print(f"  {YELLOW}Kein Name eingegeben.{RESET}")
+        return
+
+    slug = "".join(c for c in name.lower() if c.isalnum() or c == "-")
+    jobs = []
+    for pname, tpl, marker, weak in PLATFORMS:
+        url = tpl.format(quote(name, safe=""))
+        jobs.append(("Plattform", pname, url,
+                     lambda u=url, m=marker, w=weak: check_url(u, m, w)))
+    if slug:
+        for tld in DOMAINS:
+            dom = slug + tld
+            jobs.append(("Domain", dom, "https://" + dom,
+                         lambda d=dom: check_domain(d)))
+
+    print(f"\n  {WHITE}Durchsuche {len(jobs)} Plattformen/Domains fuer "
+          f"{ORANGE}{name}{WHITE} ...{RESET}\n")
+
+    def run(job):
+        cat, label, url, fn = job
+        try:
+            return cat, label, url, fn()
+        except Exception:
+            return cat, label, url, "unclear"
+
+    results = []
+    with ThreadPoolExecutor(max_workers=16) as ex:
+        futures = [ex.submit(run, j) for j in jobs]
+        for i, f in enumerate(as_completed(futures), 1):
+            res = f.result()
+            results.append(res)
+            progress(i, len(jobs), res[1])
+    print("\n")
+
+    look = {"free": (GREEN, "FREI  "), "taken": (RED, "BELEGT"),
+            "unclear": (YELLOW, "UNKLAR")}
+    order = {"free": 0, "unclear": 1, "taken": 2}
+    results.sort(key=lambda r: (order[r[3]], r[0], r[1]))
+    for cat, label, url, status in results:
+        col, txt = look[status]
+        print(f"  {col}{txt}{RESET}  {cat:<9} {label:<20} {GRAY}{url}{RESET}")
+
+    n_free = sum(1 for r in results if r[3] == "free")
+    n_taken = sum(1 for r in results if r[3] == "taken")
+    n_unclear = sum(1 for r in results if r[3] == "unclear")
+    print(f"\n  {GREEN}{n_free} frei{RESET}  |  {RED}{n_taken} belegt{RESET}  |  "
+          f"{YELLOW}{n_unclear} unklar{RESET}")
+    print(f"  {GRAY}UNKLAR = Seite blockt Bots, Link bitte selbst pruefen.{RESET}")
+
+    if ask("\nErgebnis als .txt speichern? (j/n): ").lower() in ("j", "ja", "y"):
+        fname = f"echo_ai_{slug or 'name'}.txt"
+        with open(fname, "w", encoding="utf-8") as fh:
+            fh.write(f"Echo AI - Namens-Check: {name}\n\n")
+            for cat, label, url, status in results:
+                fh.write(f"{status.upper():<8}{cat:<10}{label:<20}{url}\n")
+        print(f"  {GREEN}Gespeichert:{RESET} {os.path.abspath(fname)}")
+
+
+# ----------------------------------------------------------------------------
+# 2) IP-Scanner: Geraete im lokalen Netzwerk
+# ----------------------------------------------------------------------------
+def local_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))  # es wird kein Paket gesendet
+        return s.getsockname()[0]
+    except Exception:
+        return None
+    finally:
+        s.close()
+
+
+def ping(ip):
+    cmd = (["ping", "-n", "1", "-w", "700", ip] if os.name == "nt"
+           else ["ping", "-c", "1", "-W", "1", ip])
+    try:
+        out = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             timeout=4).stdout.decode("utf-8", "ignore").lower()
+        return "ttl=" in out
+    except Exception:
+        return False
+
+
+def arp_table():
+    table = {}
+    try:
+        out = subprocess.run(["arp", "-a"], stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL,
+                             timeout=6).stdout.decode("utf-8", "ignore")
+    except Exception:
+        return table
+    for line in out.splitlines():
+        ip = re.search(r"(\d{1,3}(?:\.\d{1,3}){3})", line)
+        mac = re.search(r"((?:[0-9a-fA-F]{1,2}[:-]){5}[0-9a-fA-F]{1,2})", line)
+        if ip and mac:
+            table[ip.group(1)] = mac.group(1).replace("-", ":").upper()
+    return table
+
+
+def ip_scanner():
+    own = local_ip()
+    if not own:
+        print(f"  {RED}Kein Netzwerk gefunden.{RESET}")
+        return
+    default_base = ".".join(own.split(".")[:3])
+    print(f"  Deine lokale IP: {ORANGE}{own}{RESET}\n")
+    base = ask(f"Netzwerk-Basis (Enter = {default_base}): ") or default_base
+    if not re.fullmatch(r"\d{1,3}\.\d{1,3}\.\d{1,3}", base):
+        print(f"  {RED}Ungueltig. Beispiel: 192.168.178{RESET}")
+        return
+
+    ips = [f"{base}.{i}" for i in range(1, 255)]
+    print(f"\n  {WHITE}Scanne {base}.1 - {base}.254 ...{RESET}\n")
+
+    def probe(ip):
+        if not ping(ip):
+            return None
+        try:
+            host = socket.gethostbyaddr(ip)[0]
+        except Exception:
+            host = "-"
+        return ip, host
+
+    found = []
+    with ThreadPoolExecutor(max_workers=64) as ex:
+        futures = [ex.submit(probe, ip) for ip in ips]
+        for i, f in enumerate(as_completed(futures), 1):
+            res = f.result()
+            if res:
+                found.append(res)
+            progress(i, len(ips), f"gefunden: {len(found)}")
+    print("\n")
+
+    if not found:
+        print(f"  {YELLOW}Keine Geraete gefunden (Ping evtl. durch Firewall blockiert).{RESET}")
+        return
+    macs = arp_table()
+    found.sort(key=lambda r: tuple(int(p) for p in r[0].split(".")))
+    print(f"  {ORANGE}{'IP-Adresse':<17}{'MAC-Adresse':<20}Name{RESET}")
+    print(f"  {GRAY}{'-' * 60}{RESET}")
+    for ip, host in found:
+        tag = f"  {GREEN}<- du{RESET}" if ip == own else ""
+        print(f"  {ip:<17}{macs.get(ip, '-'):<20}{host}{tag}")
+    print(f"\n  {GREEN}{len(found)} Geraete online.{RESET}")
+
+
+# ----------------------------------------------------------------------------
+# 3) Port-Scanner (nur eigene Geraete / mit Erlaubnis!)
+# ----------------------------------------------------------------------------
+def parse_ports(spec):
+    ports = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            ports.update(range(int(a), int(b) + 1))
+        else:
+            ports.add(int(part))
+    ports = {p for p in ports if 1 <= p <= 65535}
+    if len(ports) > 5000:
+        raise ValueError("Maximal 5000 Ports pro Scan.")
+    return sorted(ports)
+
+
+def port_scanner():
+    target = ask("IP oder Domain: ")
+    if not target:
+        return
+    try:
+        ip = socket.gethostbyname(target)
+    except Exception:
+        print(f"  {RED}Host nicht gefunden.{RESET}")
+        return
+
+    print(f"\n  {YELLOW}Nur Geraete scannen, die dir gehoeren oder fuer die du "
+          f"eine Erlaubnis hast.{RESET}")
+    if ask("Ist das der Fall? (j/n): ").lower() not in ("j", "ja", "y"):
+        print(f"  {GRAY}Abgebrochen.{RESET}")
+        return
+
+    spec = ask("Ports (Enter = haeufige, oder z.B. 1-1024 / 80,443): ")
+    try:
+        ports = parse_ports(spec) if spec else sorted(COMMON_PORTS)
+    except ValueError as e:
+        print(f"  {RED}Ungueltige Eingabe: {e}{RESET}")
+        return
+
+    print(f"\n  {WHITE}Scanne {ip} ({len(ports)} Ports) ...{RESET}\n")
+
+    def probe(port):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.7)
+        try:
+            return port, s.connect_ex((ip, port)) == 0
+        except Exception:
+            return port, False
+        finally:
+            s.close()
+
+    open_ports = []
+    with ThreadPoolExecutor(max_workers=200) as ex:
+        futures = [ex.submit(probe, p) for p in ports]
+        for i, f in enumerate(as_completed(futures), 1):
+            port, is_open = f.result()
+            if is_open:
+                open_ports.append(port)
+            progress(i, len(ports), f"offen: {len(open_ports)}")
+    print("\n")
+
+    if not open_ports:
+        print(f"  {YELLOW}Keine offenen Ports gefunden.{RESET}")
+        return
+    print(f"  {ORANGE}{'Port':<8}Dienst{RESET}")
+    print(f"  {GRAY}{'-' * 30}{RESET}")
+    for p in sorted(open_ports):
+        try:
+            svc = COMMON_PORTS.get(p) or socket.getservbyport(p)
+        except Exception:
+            svc = "-"
+        print(f"  {GREEN}{p:<8}{RESET}{svc}")
+    print(f"\n  {GREEN}{len(open_ports)} offene Ports.{RESET}")
+
+
+# ----------------------------------------------------------------------------
+# 4) IP-Info
+# ----------------------------------------------------------------------------
+def ip_info():
+    if not need_internet():
+        return
+    target = ask("IP oder Domain (Enter = deine eigene oeffentliche IP): ")
+    url = ("http://ip-api.com/json/" + quote(target) +
+           "?lang=de&fields=status,message,query,country,regionName,city,zip,"
+           "lat,lon,timezone,isp,org,as")
+    try:
+        with urllib.request.urlopen(
+                urllib.request.Request(url, headers={"User-Agent": UA}),
+                timeout=8) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except Exception as e:
+        print(f"  {RED}Abfrage fehlgeschlagen: {e}{RESET}")
+        return
+    if data.get("status") != "success":
+        print(f"  {RED}Nicht gefunden: {data.get('message', 'unbekannter Fehler')}{RESET}")
+        return
+    rows = [
+        ("IP", data.get("query")), ("Land", data.get("country")),
+        ("Region", data.get("regionName")), ("Stadt", data.get("city")),
+        ("PLZ", data.get("zip")), ("Zeitzone", data.get("timezone")),
+        ("Anbieter", data.get("isp")), ("Organisation", data.get("org")),
+        ("AS", data.get("as")),
+        ("Koordinaten", f"{data.get('lat')}, {data.get('lon')}"),
+    ]
+    print()
+    for k, v in rows:
+        print(f"  {ORANGE}{k:<14}{RESET}{v or '-'}")
+    print(f"\n  {GRAY}Standort ist nur eine grobe Schaetzung (meist Stadt des Anbieters).{RESET}")
+
+
+# ----------------------------------------------------------------------------
+# 5) DNS-Lookup
+# ----------------------------------------------------------------------------
+def dns_lookup():
+    if not need_internet():
+        return
+    domain = ask("Domain (z.B. example.com): ")
+    if not domain:
+        return
+    try:
+        infos = socket.getaddrinfo(domain, None)
+    except Exception:
+        print(f"  {RED}Keine DNS-Antwort - Domain existiert nicht oder ist nicht registriert.{RESET}")
+        return
+    seen = []
+    for fam, _, _, _, addr in infos:
+        ip = addr[0]
+        if ip not in seen:
+            seen.append(ip)
+    print()
+    for ip in seen:
+        typ = "IPv6" if ":" in ip else "IPv4"
+        try:
+            rev = socket.gethostbyaddr(ip)[0]
+        except Exception:
+            rev = "-"
+        print(f"  {ORANGE}{typ:<6}{RESET}{ip:<40}{GRAY}{rev}{RESET}")
+
+
+# ----------------------------------------------------------------------------
+# Menue
+# ----------------------------------------------------------------------------
+ACTIONS = {
+    "1": ("Namens-Check       (Plattformen + Domains)", name_check),
+    "2": ("IP-Scanner         (Geraete im lokalen Netzwerk)", ip_scanner),
+    "3": ("Port-Scanner       (offene Ports eines Hosts)", port_scanner),
+    "4": ("IP-Info            (Standort/Anbieter einer IP oder Domain)", ip_info),
+    "5": ("DNS-Lookup         (Domain -> IP)", dns_lookup),
+}
+
+
+def main():
+    init_console()
+    splash()
+    while True:
+        clear()
+        banner()
+        for key, (title, _) in ACTIONS.items():
+            print(f"  {ORANGE}[{key}]{RESET} {title}")
+        print(f"  {ORANGE}[0]{RESET} Beenden\n")
+        try:
+            choice = ask("Auswahl: ")
+        except (KeyboardInterrupt, EOFError):
+            choice = "0"
+        if choice == "0":
+            print(f"\n  {ORANGE}Bis bald - Echo AI{RESET}\n")
+            break
+        if choice not in ACTIONS:
+            print(f"\n  {RED}Bitte eine Zahl aus dem Menue eingeben.{RESET}")
+            time.sleep(1.2)
+            continue
+        title, func = ACTIONS[choice]
+        clear()
+        banner()
+        print(f"  {BOLD}{ORANGE}[{choice}] {title.split('(')[0].strip()}{RESET}\n")
+        try:
+            func()
+        except KeyboardInterrupt:
+            print(f"\n  {YELLOW}Abgebrochen.{RESET}")
+        except Exception as e:
+            print(f"\n  {RED}Fehler: {e}{RESET}")
+        pause()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:  # Fenster nicht sofort schliessen, damit man den Fehler lesen kann
+        print(f"\nFehler: {exc}")
+        input("Enter zum Beenden ...")
